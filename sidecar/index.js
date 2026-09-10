@@ -72,10 +72,28 @@ function broadcast(sessionId, event, data) {
   }
 }
 
+/**
+ * ID pesan dalam bentuk kanonik `fromMe_remote_id`.
+ *
+ * Build WhatsApp Web yang beredar sekarang tidak lagi menyertakan `_serialized`
+ * pada objek key — bentuknya kini `{ fromMe, remote, id, self }`. Tanpa ID,
+ * pesan tidak bisa dide-duplikasi saat disimpan maupun dirujuk untuk mengambil
+ * media. Bagian-bagiannya masih ada, jadi ID-nya dirakit ulang.
+ */
+function serializeMessageId(id) {
+  if (!id) return null;
+  if (id._serialized) return id._serialized;
+
+  const remote = id.remote?._serialized ?? id.remote ?? null;
+  if (remote === null || id.id === undefined || id.id === null) return null;
+
+  return `${id.fromMe ? 'true' : 'false'}_${String(remote)}_${String(id.id)}`;
+}
+
 function serializeMessage(m) {
   if (!m) return null;
   return {
-    id: m.id?._serialized ?? null,
+    id: serializeMessageId(m.id),
     from: m.from,
     to: m.to,
     body: m.body,
