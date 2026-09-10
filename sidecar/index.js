@@ -93,15 +93,50 @@ function serializeMessage(m) {
 
 async function bootSession(sessionId) {
   const existing = sessions.get(sessionId);
-  if (existing) return existing;
+
+  // A session that failed to initialize stays cached forever otherwise: every
+  // later /start hands back the same dead object, so the caller sees `error`
+  // and no QR no matter how many times they retry. Only a shell can recover
+  // it. Drop it and boot fresh instead.
+  if (existing && existing.status === 'error') {
+    try { await existing.client.destroy(); } catch (_) { /* already gone */ }
+    sessions.delete(sessionId);
+  } else if (existing) {
+    return existing;
+  }
 
   // Reuse a system Chrome/Chromium when PUPPETEER_EXECUTABLE_PATH is set
   // (e.g. installed with --skip-chromium). Falls back to Puppeteer's bundled
   // Chromium when unset.
   const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
 
+  // Pin the WhatsApp Web build.
+  //
+  // whatsapp-web.js injects code that matches a specific WhatsApp Web release.
+  // When WhatsApp ships a newer web client than the library knows about, pairing
+  // still succeeds — `authenticated` fires — but `ready` never does, leaving the
+  // session permanently unusable. Set WA_WEB_VERSION to a build known to work
+  // with the installed whatsapp-web.js; leave it unset to track whatever
+  // WhatsApp is serving right now.
+  //
+  // Versions: https://github.com/wppconnect-team/wa-version/tree/main/html
+  // remotePath uses `{version}` as a placeholder — RemoteWebCache substitutes it.
+  // Non-strict on purpose: if the archive can't be reached, whatsapp-web.js falls
+  // back to the live version rather than refusing to start. That means a pin can
+  // silently stop applying, so check the archive is reachable when a pinned
+  // version stops helping.
+  const webVersion = process.env.WA_WEB_VERSION || undefined;
+  const webVersionCache = webVersion
+    ? {
+      type: 'remote',
+      remotePath: process.env.WA_WEB_VERSION_REMOTE_PATH
+          || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+    }
+    : undefined;
+
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: sessionId, dataPath: SESSION_DIR }),
+    ...(webVersion ? { webVersion, webVersionCache } : {}),
     puppeteer: {
       headless: true,
       executablePath,
