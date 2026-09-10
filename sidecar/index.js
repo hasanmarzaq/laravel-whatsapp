@@ -381,6 +381,7 @@ app.get('/sessions/:id/chats', async (req, res, next) => {
   try {
     const s = getSession(req.params.id);
     requireReady(s);
+    await ensureChatModelPatch(s.client);
     const chats = await s.client.getChats();
     res.json(chats.map((c) => ({
       id: c.id._serialized,
@@ -393,10 +394,71 @@ app.get('/sessions/:id/chats', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/**
+ * whatsapp-web.js membaca `chat.lastReceivedKey._serialized` tanpa memeriksa
+ * properti itu ada. Pada build WhatsApp Web yang beredar sekarang, objek key
+ * tidak lagi punya `_serialized` (kuncinya: fromMe, remote, id, self), sehingga
+ * IndexedDB diminta mengambil kunci `undefined` dan melempar:
+ *
+ *   DataError: Failed to execute 'get' on 'IDBObjectStore':
+ *   No key or key range specified.
+ *
+ * Karena getChats() memetakan SEMUA chat lewat getChatModel dengan Promise.all,
+ * satu chat bermasalah menjatuhkan seluruh daftar — itu sebabnya /chats dan
+ * /groups sama-sama gagal sementara /contacts selamat.
+ *
+ * Patch ini menetralkan `lastReceivedKey` selama pemanggilan aslinya, sehingga
+ * upstream mengambil cabang `: null` dan tidak menyentuh IndexedDB, lalu mengisi
+ * kembali lastMessage dari koleksi pesan yang sudah ada di memori. Sisa
+ * getChatModel dibiarkan apa adanya.
+ *
+ * Idempoten, dan dipasang ulang otomatis kalau halaman dimuat ulang.
+ */
+async function ensureChatModelPatch(client) {
+  await client.pupPage.evaluate(() => {
+    if (window.__waGatewayChatModelPatched) return;
+    if (!window.WWebJS || typeof window.WWebJS.getChatModel !== 'function') return;
+
+    const original = window.WWebJS.getChatModel;
+
+    window.WWebJS.getChatModel = async (chat, opts) => {
+      const key = chat && chat.lastReceivedKey;
+      const brokenKey = !!key && key._serialized === undefined;
+
+      let model;
+      if (brokenKey) {
+        const saved = key;
+        Object.defineProperty(chat, 'lastReceivedKey', { value: null, configurable: true, writable: true });
+        try {
+          model = await original(chat, opts);
+        } finally {
+          Object.defineProperty(chat, 'lastReceivedKey', { value: saved, configurable: true, writable: true });
+        }
+      } else {
+        model = await original(chat, opts);
+      }
+
+      // Pulihkan pratinjau pesan terakhir dari memori — tanpa IndexedDB.
+      if (model && !model.lastMessage) {
+        try {
+          const msgs = chat.msgs && chat.msgs.getModelsArray ? chat.msgs.getModelsArray() : [];
+          const last = msgs[msgs.length - 1];
+          if (last) model.lastMessage = window.WWebJS.getMessageModel(last);
+        } catch (_) { /* pratinjau bersifat opsional */ }
+      }
+
+      return model;
+    };
+
+    window.__waGatewayChatModelPatched = true;
+  });
+}
+
 app.get('/sessions/:id/groups', async (req, res, next) => {
   try {
     const s = getSession(req.params.id);
     requireReady(s);
+    await ensureChatModelPatch(s.client);
     const chats = await s.client.getChats();
     res.json(chats.filter((c) => c.isGroup).map((c) => ({
       id: c.id._serialized,
