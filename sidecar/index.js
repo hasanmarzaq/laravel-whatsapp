@@ -454,6 +454,30 @@ async function ensureChatModelPatch(client) {
   });
 }
 
+/**
+ * Riwayat pesan sebuah chat, langsung dari WhatsApp Web.
+ *
+ * Sidecar sebelumnya tidak punya jalur ini, sehingga UI hanya bisa menampilkan
+ * pesan yang kebetulan tertangkap listener SSE — percakapan yang sudah ada
+ * sebelum persistensi dinyalakan tidak akan pernah muncul. Dipakai perintah
+ * backfill di sisi Laravel.
+ */
+app.get('/sessions/:id/chats/:chatId/messages', async (req, res, next) => {
+  try {
+    const s = getSession(req.params.id);
+    requireReady(s);
+    await ensureChatModelPatch(s.client);
+
+    const requested = parseInt(req.query.limit, 10);
+    const limit = Math.min(Math.max(Number.isFinite(requested) ? requested : 50, 1), 500);
+
+    const chat = await s.client.getChatById(req.params.chatId);
+    const messages = await chat.fetchMessages({ limit });
+
+    res.json(messages.map(serializeMessage));
+  } catch (e) { next(e); }
+});
+
 app.get('/sessions/:id/groups', async (req, res, next) => {
   try {
     const s = getSession(req.params.id);
