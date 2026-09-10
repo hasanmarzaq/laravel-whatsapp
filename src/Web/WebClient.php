@@ -93,9 +93,27 @@ class WebClient
         $decoded = $body === '' ? [] : json_decode($body, true);
 
         if ($status >= 400) {
-            $message = is_array($decoded) && isset($decoded['error'])
-                ? $decoded['error']
-                : "Sidecar HTTP {$status}";
+            $raw = is_array($decoded) && isset($decoded['error']) && is_string($decoded['error'])
+                ? trim($decoded['error'])
+                : '';
+
+            $endpoint = strtoupper($method).' '.ltrim($path, '/');
+
+            /*
+             * WhatsApp Web's own bundle is minified, so an exception thrown inside it
+             * surfaces as a stray identifier — `getChats()` currently fails with the
+             * single letter "r". Passed through untouched, the operator sees a lone
+             * letter in a red banner with nothing to act on.
+             *
+             * Keep the raw value (it's the only clue upstream gives) but always state
+             * which call failed, and say plainly when the payload is too short to mean
+             * anything.
+             */
+            $message = match (true) {
+                $raw === '' => "Sidecar HTTP {$status} on {$endpoint}",
+                mb_strlen($raw) <= 3 => "Sidecar HTTP {$status} on {$endpoint}: WhatsApp Web returned an internal error (\"{$raw}\") with no usable detail — this usually means whatsapp-web.js does not support the WhatsApp Web build currently in use.",
+                default => "Sidecar HTTP {$status} on {$endpoint}: {$raw}",
+            };
 
             throw new SidecarException($message, $status);
         }
